@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               iControl
-version:            0.01
+version:            0.02
 abstract:           A Perl interface to the F5 iControl API
 author:
     - Luke Poskitt <ltp@cpan.org>

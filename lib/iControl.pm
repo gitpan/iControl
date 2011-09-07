@@ -10,7 +10,7 @@ use SOAP::Lite;
 use vars qw($VERSION @ISA @EXPORT @EXPORT_OK);
 
 @ISA			= qw(Exporter);
-$VERSION 		= '0.01';
+$VERSION 		= '0.02';
 
 =head1 NAME
 
@@ -72,7 +72,12 @@ our $modules	= {
 								get_list		=> 0
 								}
 					},
-		Networking	=> 	{},
+		Networking	=> 	{
+					Interfaces	=>	{    
+								get_list		=> 0,
+								get_statistics		=> 'interface'
+								} 
+					},
 		System		=> 	{
 					ConfigSync	=>	{
 								save_configuration	=> 0,
@@ -463,7 +468,7 @@ sub __process_statistics {
 
 	foreach (@{%{@{%{$statistics}->{statistics}}[0]}->{statistics}}) {
 		my $type			= %{$_}->{type};
-		$stat_obj{stats}{$type}		= ((%{$_}->{value}{high})<<32)|(%{$_}->{value}{low});
+		$stat_obj{stats}{$type}		= ((%{$_}->{value}{high})<<32)|(abs %{$_}->{value}{low});
 	}
 	
 	return %stat_obj
@@ -595,6 +600,54 @@ sub save_configuration {
 	$self->_request(module => 'System', interface => 'ConfigSync', method => 'save_configuration', data => { filename => $filename, save_flag => 'SAVE_FULL'});
 
 	return 1	
+}
+
+=head3 get_interface_list
+
+Retuns a list of all physical interfaces on the target device.
+
+=cut
+
+sub get_interface_list {
+	my $self	= shift;
+	return sort @{$self->_request(module => 'Networking', interface => 'Interfaces', method => 'get_list')}
+}       
+        
+=head3 get_interface_statistics ($interface)
+
+Returns all statistics for the specified interface as a VirtualServerStatistics object.  Consider using B<get_interface_statistics_stringified>
+for accessing interface statistics in a pre-parsed hash structure.      
+
+=cut
+
+sub get_interface_statistics {
+	my ($self, $inet)=@_;
+	return $self->_request(module => 'Networking', interface => 'Interfaces', method => 'get_statistics', data => { interfaces => [$inet] })
+}
+
+=head3 get_interface_statistics_stringified ($interface)
+
+Returns all statistics for the specified interface as a multidimensional hash with the following structure;
+
+	{
+		timestamp	=> 'yyyy-mm-dd-hh-mm-ss',
+		stats		=> {
+					statistic_1	=> value,
+					statistic_2	=> value,
+					...
+					statistic_n	=> value
+				   }
+	}
+
+This function accepts a single parameter; the interface for which the statistics are to be returned.
+
+For specific information regarding data and units of measurement for statistics methods, please see the B<Notes> section
+
+=cut
+
+sub get_interface_statistics_stringified {
+	my ($self, $inet)=@_;
+	return __process_statistics($self->get_interface_statistics($inet))
 }
 
 =head3 get_vs_list
@@ -1046,7 +1099,7 @@ In non-stringified statistic methods, these return values are ULong64 objects as
 In stringified statistic method calls, the values are processed on the client side into a local 64-bit representation
 of the value using the following form.
 
-	$value = ($high<<32)|$low;
+	$value = ($high<<32)|(abs $low);
 
 Stringified method calls are guaranteed to return a correct localised 64-bit representation of the value.
 
