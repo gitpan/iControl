@@ -10,7 +10,7 @@ use SOAP::Lite;
 use vars qw($VERSION @ISA @EXPORT @EXPORT_OK);
 
 @ISA			= qw(Exporter);
-$VERSION 		= '0.02';
+$VERSION 		= '0.03';
 
 =head1 NAME
 
@@ -28,9 +28,37 @@ iControl - A Perl interface to the F5 iControl API
                                 proto		=> 'https'
                         );
 
-        my @node_list   = $ic->get_node_list();
+	my $virtual	= ($ic->get_vs_list())[0];
 
+	my %stats	= $ic->get_vs_statistics_stringified($virtual);;
 
+	print '*'x50,"\nVirtual: $virtual\n",'*'x50,"\nTimestamp: $stats{timestamp}\n";
+
+	foreach my $s (sort keys %{$stats{stats}}) {
+		print "$s\t$stats{stats}{$s}\n"
+	}
+
+=head1 DESCRIPTION
+
+This package provides a Perl interface to the F5 iControl API.
+
+The F5 iControl API is an open SOAP/XML for communicating with supported F5 BIGIP products.
+
+The primary aim of this package is to provide a simplified interface to an already simple and
+intutive API and to allow the user to do more with less code.  By reducing the API invocations
+to methods returning simple types, it is hoped that this module will provide a simple alternative
+for common tasks.
+
+The secondary aim for this package is to provide a simple interface for accessing statistical
+data from the iControl API for monitoring, recording, archival and display in other systems.
+This objective has largely been obsoleted in v11 with the introduction of new statistical
+monitoring and display features in the web UI.
+
+This package generally provides two methods for each each task; a raw method typically returning
+the response as received from iControl, and a "stringified" method returning a parsed response.
+
+In general, the stringified methods will typically fufill most requirements and should usually
+be easier to use.
 
 =cut
 
@@ -56,7 +84,13 @@ our $modules	= {
 								},
 					Pool		=>	{
 								get_list		=> 0,
-								get_member		=> 'pool_names'
+								get_member		=> 'pool_names',
+								get_statistics		=> 'pool_names',
+								get_all_statistics	=> 'pool_names'
+								},
+					PoolMember	=>	{
+								get_statistics		=> {pool_names => 1, members => 1},
+								get_all_statistics	=> 'pool_names'
 								},
 					NodeAddress	=>	{
 								get_list		=> 0,
@@ -73,10 +107,10 @@ our $modules	= {
 								}
 					},
 		Networking	=> 	{
-					Interfaces	=>	{    
+					Interfaces	=>	{
 								get_list		=> 0,
-								get_statistics		=> 'interface'
-								} 
+								get_statistics		=> 'interfaces'
+								}
 					},
 		System		=> 	{
 					ConfigSync	=>	{
@@ -406,13 +440,55 @@ sub _get_username {
 	return $self->{username};
 }
 
-# We do most of our request validation in this method so it is a little complex and not entirely intuitive, 
-# but it does allow us to handle any known bad invocations rather than just passing them through to the server.
-# 
-# It also allows us to definitively limit the over-riding or abuse of the internal _request method by limiting
-# invocations to the format specified in global $modules.
+# We do most of our request validation in this method so it is unnessecarily complex, not entirely intuitive, uglier
+# than a hat full of assholes and slightly less elegant than Lindsay Lohan exiting a limo.
 #
-# We can then implement accessor methods by essentially copying the API invocation.
+# By pushing complexity from our public methods into here, we can implement some basic checks against known bad
+# invocations rather than just passing them through to iControl to handle.
+# 
+# It also allows us to limit the over-riding or abuse of the internal _request method by limiting
+# invocations to the parameter format specified in global $modules struct.
+#
+# We can then implement accessor methods by essentially copying the API invocation from the reference.  For example,
+# to implement the System::SystemInfo::get_system_id API call, the reference gives the prototype as;
+#
+#  String get_system_id();
+#
+# Note also that the API uses the namespace convention of Module::Interface::Method, so that our get_system_id method
+# is implemented in the SystemInfo interface, which is under the System module.
+#
+# Implementing this, we would first add the method to our $modules struct maintaining the API heirarchy;
+#
+#  $modules => {
+#	       System => {
+#			 SystemInfo => {
+#				       get_system_id => 0
+#
+# Analogous to:
+#
+#  $modules => {
+#	       Module => {
+#			 Interface => {
+#				      Method => parameters
+#
+# A value of 0 is used for get_system_id as the method prototype takes no parameters.  For methods taking a single
+# parameter, we would use the value of the required parameter name, for methods taking numerous parameters, we would
+# use a hash containing a key for each parameter. 
+#
+# Our method is then created as an invocation to the private _request method setting the value of the module,
+# interface and method arguments as per the API reference. i.e.
+#
+#  module 	=> 'System'
+#  interface  	=> 'SystemInfo'
+#  method	=> 'get_system_id'
+#
+# Which is intuitively translated into the implementation below;
+# 
+#  sub get_cluster_enabled_state {
+#	my $self	= shift;
+#	return $self->_request(module => 'System', interface => 'Cluster', method => 'get_cluster_enabled_state');
+#  }
+#
 
 sub _request {
 	my ($self, %args)= @_;
@@ -420,23 +496,34 @@ sub _request {
 	$args{interface}and exists $modules->{$args{module}}->{$args{interface}}		or return "Request error: unknown interface name for module $args{module}: \"$args{interface}\"";
 	$args{method}	and exists $modules->{$args{module}}->{$args{interface}}->{$args{method}}or return "Request error: unknown method name for module $args{module} and interface $args{interface}: \"$args{method}\"";
 
+	my @params = ();
+
 	if ($modules->{$args{module}}->{$args{interface}}->{$args{method}}) {
-		my $arg = (keys %{$args{data}})[0];
-		$arg	= $modules->{$args{module}}->{$args{interface}}->{$args{method}}	or return "Request error: method $args{method} for interface $args{interface} in module $args{module} requires " .
-													  "mandatory data parameter \"$modules->{$args{module}}->{$args{interface}}->{$args{method}}\"";
+
+		foreach my $arg (keys %{$args{data}}) {
+
+			if (ref $modules->{$args{module}}->{$args{interface}}->{$args{method}} eq 'HASH') {
+				exists $modules->{$args{module}}->{$args{interface}}->{$args{method}}->{$arg}
+												or croak "Request error: method $args{method} for interface $args{interface} in module $args{module} requires " .
+										  		"mandatory data parameter \"$modules->{$args{module}}->{$args{interface}}->{$args{method}}->{$arg}\"";
+				push @params, SOAP::Data->name($arg => $args{data}{$arg});
+			}
+			else {
+				$arg eq $modules->{$args{module}}->{$args{interface}}->{$args{method}}
+												or croak "Request error: method $args{method} for interface $args{interface} in module $args{module} requires " .
+												  "mandatory data parameter \"$modules->{$args{module}}->{$args{interface}}->{$args{method}}\"";
+				push @params, SOAP::Data->name(%{$args{data}});
+			}
+		}
 	}
 
 	$self->_set_uri($args{module}, $args{interface});
 	my $method	= $args{method};
-	my $query	= $self->{_client}->$method(SOAP::Data->name(%{$args{data}}));
+	my $query	= $self->{_client}->$method(@params);
 	$query->fault	and confess('SOAP call failed: ', $query->faultstring());
 	$self->_unset_uri();
 	return $query->result;
 }
-
-#**************************************************************************************************
-# Private utility methods
-#**************************************************************************************************
 
 sub __get_timestamp {
 	my %ts;
@@ -472,22 +559,29 @@ sub __process_statistics {
 	}
 	
 	return %stat_obj
+}
 
+sub __process_pool_member_statistics {
+	my $statistics	= shift;
+	my %stat_obj;
+
+	foreach (@{$statistics}) {
+		my $node	= %{@{%{$_}->{statistics}}[0]}->{member}->{address}.':'.%{@{%{$_}->{statistics}}[0]}->{member}->{port};
+		$stat_obj{$node} = {__process_statistics($_)};
+	}
+	
+	return %stat_obj
 }
 
 sub __zero_fill {
 	my $val = shift; 
 	return ($val < 10 ? '0' . $val : $val)
-	# sprintf("%02d",$date);
 }
 
 #sub _mutator_request {
 #	my ($self, %args)=@_;
 #	$args{module}	&& exists $mutators->{$args{module}}
 #}
-#**************************************************************************************************
-# Public interface below here
-#**************************************************************************************************
 
 =head3 get_system_information
 
@@ -518,7 +612,7 @@ sub get_system_information {
 	return $self->_request(module => 'System', interface => 'SystemInfo', method => 'get_system_information');
 }
 
-=head3 get_cluster_list
+=head3 get_cluster_list ()
 
 Gets a list of the cluster names.
 
@@ -529,7 +623,7 @@ sub get_cluster_list {
 	return $self->_request(module => 'System', interface => 'Cluster', method => 'get_list');
 }
 
-=head3 get_failover_mode
+=head3 get_failover_mode ()
 
 Gets the current fail-over mode that the device is running in. 
 
@@ -540,7 +634,7 @@ sub get_failover_mode {
 	return $self->_request(module => 'System', interface => 'Failover', method => 'get_failover_mode');
 }
 
-=head3 get_failover_state
+=head3 get_failover_state ()
 
 Gets the current fail-over state that the device is running in. 
 
@@ -551,7 +645,7 @@ sub get_failover_state {
 	return $self->_request(module => 'System', interface => 'Failover', method => 'get_failover_state');
 }
 
-=head3 get_cluster_enabled_state
+=head3 get_cluster_enabled_state ()
 
 Gets the cluster enabled states. 
 
@@ -602,21 +696,24 @@ sub save_configuration {
 	return 1	
 }
 
-=head3 get_interface_list
+=head3 get_interface_list ()
 
-Retuns a list of all physical interfaces on the target device.
+	my @interfaces = $ic->get_interface_list();
+
+Retuns an ordered list of all interfaces on the target device.
 
 =cut
 
 sub get_interface_list {
 	my $self	= shift;
 	return sort @{$self->_request(module => 'Networking', interface => 'Interfaces', method => 'get_list')}
-}       
-        
+}
+
 =head3 get_interface_statistics ($interface)
 
-Returns all statistics for the specified interface as a VirtualServerStatistics object.  Consider using B<get_interface_statistics_stringified>
-for accessing interface statistics in a pre-parsed hash structure.      
+Returns all statistics for the specified interface as a InterfaceStatistics object.  Unless you specifically
+require access to the raw object, consider using B<get_interface_statistics_stringified> for a pre-parsed hash 
+in an easy-to-digest format.
 
 =cut
 
@@ -627,21 +724,24 @@ sub get_interface_statistics {
 
 =head3 get_interface_statistics_stringified ($interface)
 
-Returns all statistics for the specified interface as a multidimensional hash with the following structure;
+	my $inet	= ($ic->get_interface_list())[0];
+	my %stats       = $ic->get_interface_statistics_stringified($inet);
+
+	print "Interface: $inet - Bytes in: $stats{stats}{STATISTIC_BYTES_IN} - Bytes out: STATISTIC_BYTES_OUT";
+
+Returns all statistics for the specified interface as a hash having the following structure;
 
 	{
-		timestamp	=> 'yyyy-mm-dd-hh-mm-ss',
-		stats		=> {
-					statistic_1	=> value,
-					statistic_2	=> value,
-					...
-					statistic_n	=> value
-				   }
+	timestamp	=> 'YYYY-MM-DD-hh-mm-ss',
+	stats		=> 	{
+				statistic_1	=> value
+				...
+				statistic_n	=> value
+				}
 	}
 
-This function accepts a single parameter; the interface for which the statistics are to be returned.
-
-For specific information regarding data and units of measurement for statistics methods, please see the B<Notes> section
+Where the keys of the stats hash are the names of the statistic types defined in a InterfaceStatistics object.
+Refer to the official API documentation for the exact structure of the InterfaceStatistics object.
 
 =cut
 
@@ -650,7 +750,7 @@ sub get_interface_statistics_stringified {
 	return __process_statistics($self->get_interface_statistics($inet))
 }
 
-=head3 get_vs_list
+=head3 get_vs_list ()
 
 	my @virtuals	= $ic->get_vs_list();
 
@@ -667,7 +767,7 @@ sub get_vs_list {
 
 	my $destination	= $ic->get_vs_destination($vs);
 
-Returns the destination of the specified virtual server in the form v4_ip_address%route_domain:port.
+Returns the destination of the specified virtual server in the form ipv4_address%route_domain:port.
 
 =cut
 
@@ -690,7 +790,7 @@ sub get_vs_enabled_state {
 	return @{$self->_request(module => 'LocalLB', interface => 'VirtualServer', method => 'get_enabled_state', data => {virtual_servers => [$vs]})}[0];
 }
 
-=head3 get_vs_all_statistics
+=head3 get_vs_all_statistics ()
 
 Returns the traffic statistics for all configured virtual servers.  The statistics are returned as 
 VirtualServerStatistics struct hence this method is useful where access to raw statistical data is required.
@@ -753,7 +853,7 @@ sub get_vs_statistics_stringified {
 	return __process_statistics($self->get_vs_statistics($vs));
 }
 
-=head3 get_default_pool_name
+=head3 get_default_pool_name ($virtual_server)
 
 	print "Virtual Server: $virtual_server\nDefault Pool: ", 
 		$ic->get_default_pool_name($virtual_server), "\n";
@@ -767,7 +867,7 @@ sub get_default_pool_name {
 	return $self->_request(module => 'LocalLB', interface => 'VirtualServer', method => 'get_default_pool_name', data => {virtual_servers => [$vs]})
 }
 
-=head3 get_pool_list
+=head3 get_pool_list ()
 
 	print join " ", ($ic->get_pool_list());
 
@@ -777,7 +877,7 @@ Returns a list of all pools in the target system.
 
 sub get_pool_list {
 	my $self	= shift;
-	return $self->_request(module => 'LocalLB', interface => 'Pool', method => 'get_list');
+	return @{$self->_request(module => 'LocalLB', interface => 'Pool', method => 'get_list')};
 }
 
 =head3 get_pool_members ($pool)
@@ -808,13 +908,107 @@ sub __get_pool_members {
 	return $self->_request(module => 'LocalLB', interface => 'Pool', method => 'get_member', data => {pool_names => [$pool]});
 }
 
-=head3 get_node_list
+=head3 get_pool_statistics ($pool)
+
+	my %stats = $ic->get_pool_statistics($pool);
+
+Returns the statistics for the specified pool as a PoolStatistics object.  For pre-parsed pool statistics consider using
+the B<get_pool_statistics_stringified> method.
+
+=cut
+
+sub get_pool_statistics {
+	my ($self, $pool)= @_;
+	return $self->_request(module => 'LocalLB', interface => 'Pool', method => 'get_statistics', data => {pool_names => [$pool]});
+}
+
+=head3 get_pool_statistics_stringified ($pool)
+
+	my %stats = $ic->get_pool_statistics_stringified($pool);
+	print "Pool $pool bytes in: $stats{stat}{STATISTIC_SERVER_SIDE_BYTES_OUT}";
+
+Returns a hash containing all pool statistics for the specified pool in a delicious, easily digestable and improved formula.
+
+=cut
+
+sub get_pool_statistics_stringified {
+	my ($self, $pool)= @_;
+	return __process_statistics($self->get_pool_statistics($pool));
+}
+
+=head3 get_pool_member_statistics ($pool)
+
+Returns all pool member statistics for the specified pool as an array of MemberStatistics objects.  Unless you feel like 
+playing with Data::Dumper on a rainy Sunday afternoon, consider using B<get_pool_member_statistics_stringified> method.
+
+=cut
+
+sub get_pool_member_statistics {
+	my ($self, $pool)= @_;
+	
+	return $self->_request(module => 'LocalLB', interface => 'PoolMember', method => 'get_statistics', data => {
+		pool_names	=> [$pool],
+		members		=> $self->__get_pool_members($pool) });
+}
+
+=head3 get_pool_member_statistics_stringified ($pool)
+
+	my %stats = $ic->get_pool_member_statistics_stringified($pool);
+
+	print "Member\t\t\t\tRequests\n",'-'x5,"\t\t\t\t",'-'x5,"\n";
+	
+	foreach my $member (sort keys %stats) {
+		print "$member\t\t$stats{$member}{stats}{STATISTIC_TOTAL_REQUESTS}\n";
+	}
+
+	# Prints a list of requests per pool member
+
+Returns a hash containing all pool member statistics for the specified pool.  The hash has the following
+structure;
+
+	member_1 => 	{
+			timestamp	=> 'YYYY-MM-DD-hh-mm-ss',
+			stats		=>	{
+						statistics_1	=> value
+						...
+						statistic_n	=> value
+						}
+			}
+	member_2 =>	{
+			...
+			}
+	member_n =>	{
+			...
+			}
+
+Each pool member is specified in the form ipv4_address%route_domain:port.
+
+=cut
+
+sub get_pool_member_statistics_stringified {
+	my ($self, $pool)= @_;
+	return __process_pool_member_statistics($self->get_pool_member_statistics($pool))
+}
+
+=head3 get_all_pool_member_statistics ($pool)
+
+Returns all pool member statistics for the specified pool.  This method is analogous to the B<get_pool_member_statistics()>
+method and the two will likely be merged in a future release.
+
+=cut
+
+sub get_all_pool_member_statistics {
+	my ($self, $pool)= @_;
+	return $self->_request(module => 'LocalLB', interface => 'PoolMember', method => 'get_all_statistics', data => {pool_names => [$pool]});
+}
+
+=head3 get_node_list ()
 
 	print join "\n", ($ic->get_node_list());
 
 Returns a list of all configured nodes in the target system.
 
-Nodes are returned as IP addresses.
+Nodes are returned as ipv4 addresses.
 
 =cut 
 
@@ -987,21 +1181,21 @@ sub get_subscription_list {
 
 =head3 create_subscription_list (%args)
 
-	my $subscription = $ic->create_subscription_list (
-						name				=> 'my_subscription_name',
-						url				=> 'http://company.com/my/eventnotification/endpoint,
-						username			=> 'username',
-						password			=> 'password',
-						ttl				=> -1,
-						min_events_per_timeslice	=> 10,
-						max_timeslice			=> 10
-					);
+        my $subscription = $ic->create_subscription_list (
+                                                name                            => 'my_subscription_name',
+                                                url                             => 'http://company.com/my/eventnotification/endpoint,
+                                                username                        => 'username',
+                                                password                        => 'password',
+                                                ttl                             => -1,
+                                                min_events_per_timeslice        => 10,
+                                                max_timeslice                   => 10
+                                        );   
 
 Creates an event subscription with the target system.  This method requires the following parameters:
 
 =over 3
 
-=item name
+=item name 
 
 A user-friendly name for the subscription.
 
@@ -1019,20 +1213,20 @@ The basic authentication password required to access the URL endpoint.
 
 =item ttl
 
-The time to live (in seconds) for this subscription. After the ttl is reached, the subscription 
+The time to live (in seconds) for this subscription. After the ttl is reached, the subscription
 will be removed from the system. A value of -1 indicates an infinite life time.
 
 =item min_events_per_timeslice
 
-The minimum number of events needed to trigger a notification. If this value is 50, then this 
-means that when 50 events are queued up they will be sent to the notification endpoint no matter 
-what the max_timeslice is set to. 
+The minimum number of events needed to trigger a notification. If this value is 50, then this
+means that when 50 events are queued up they will be sent to the notification endpoint no matter
+what the max_timeslice is set to.
 
 =item max_timeslice
 
-This maximum time to wait (in seconds) before event notifications are sent to the notification 
-endpoint. If this value is 30, then after 30 seconds a notification will be sent with the events 
-in the subscription queue. 
+This maximum time to wait (in seconds) before event notifications are sent to the notification
+endpoint. If this value is 30, then after 30 seconds a notification will be sent with the events
+in the subscription queue.
 
 =back
 
@@ -1072,11 +1266,6 @@ sub create_subscription_list {
 
 =head1 NOTES
 
-=head3 iControl Compatibility
-
-This module was written for version 10.x and less of BIGIP.  The iControl API has changed significantly with
-the most recent version (11) and some features may not exist in older version (9.x).
-
 =head3 Statistic Methods
 
 Within iControl, statistical values are a 64-bit unsigned integer represented as a B<Common::ULong64> object.
@@ -1099,7 +1288,7 @@ In non-stringified statistic methods, these return values are ULong64 objects as
 In stringified statistic method calls, the values are processed on the client side into a local 64-bit representation
 of the value using the following form.
 
-	$value = ($high<<32)|(abs $low);
+	$value = ($high<<32)|$low;
 
 Stringified method calls are guaranteed to return a correct localised 64-bit representation of the value.
 
@@ -1109,5 +1298,14 @@ It is the callers responsibility to convert the ULong struct for all other non-s
 
 Luke Poskitt, E<lt>ltp@cpan.orgE<gt>
 
+=head1 LICENSE AND COPYRIGHT
+
+This program is free software; you can redistribute it and/or modify it
+under the terms of either: the GNU General Public License as published
+by the Free Software Foundation; or the Artistic License.
+
+See http://dev.perl.org/licenses/ for more information.
+
 =cut
 
+1;

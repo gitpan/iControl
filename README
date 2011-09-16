@@ -1,15 +1,27 @@
 iControl
 
-The README is used to introduce the module and provide instructions on
-how to install the module, any machine dependencies it may have (for
-example C compilers and installed libraries) and any other information
-that should be provided before the module is installed.
+This package provides a Perl interface to the F5 iControl API.
 
-A README file is required for CPAN modules since CPAN extracts the README
-file from a module distribution so that people browsing the archive
-can use it to get an idea of the module's uses. It is usually a good idea
-to provide version information here so that people can decide whether
-fixes for the module are worth downloading.
+The F5 iControl API is an open SOAP/XML for communicating with supported F5 
+BIGIP products.
+
+The primary aim of this package is to provide a simplified interface to an 
+already simple and intutive API and to allow the user to do more with less 
+code.  By reducing the API invocations to methods returning simple types,it is 
+hoped that this module will provide a simple alternative for common tasks.
+
+The secondary aim for this package is to provide a simple interface for 
+accessing statistical data from the iControl API for monitoring, recording, 
+archival and display in other systems.  This objective has largely been 
+obsoleted in v11 with the introduction of new statistical monitoring and 
+display features in the web UI.
+
+This package generally provides two methods for each each task; a raw method 
+typically returning the response as received from iControl and a "stringified"
+method returning a parsed response.
+
+In general, the stringified methods will typically fufill most requirements 
+and should usually be easier to use.
 
 
 INSTALLATION
